@@ -1,0 +1,6 @@
+{
+	"name": "flow",
+	"module": "flow.js",
+	"description": "Neversoft-like TUI creation library/engine with mouse support (SOON) (Windows only)",
+	"type": "module"
+}
