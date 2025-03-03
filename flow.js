@@ -6,26 +6,34 @@ const assert = (o,m="Object not valid.") => {
 	if (typeof o === 'undefined' || o === undefined || o === null || o === false)
 		throw m;
 };
-if (!channel.isTTY || !input.isTTY)
+class err {
+	constructor() { throw new Error("Cannot create a UI, current environment does not have a TTY."); }
+}
+var failExport = {
+	UI: {
+		Control: err, Page: err, Label: err
+	}
+};
+var defaultExports = { assert };
+var canDraw = Bun.env.NO_COLOR!=1;
+if (!canDraw)
+{
+	console.error("NO_COLOR == 1; flow.js is disabled.");
+	module.exports = { ...failExport, ...defaultExports, canDraw };
+	return;
+}
+canDraw = channel.isTTY && input.isTTY;
+if (!canDraw)
 {
 	console.error("STDOUT/STDIN is not a TTY; flow.js is disabled.");
-	class err {
-		constructor() { throw new Error("Cannot create a UI, current environment does not have a TTY."); }
-	}
-	module.exports = {
-		UI: {
-			Control: err,
-			Page: err,
-			Label: err
-		}, assert
-	};
+	module.exports = { ...failExport, ...defaultExports, canDraw };
 	return;
 }
 //var cc = [];
 //if (process.stderr.isTTY) // redirect error when a screen is active
 const
 	res = () => {
-		channel._refreshSize(); // this stupid crap was giving me a headache, after feeling so happy at line 135
+		channel._refreshSize(); // this stupid crap was giving me a headache, after feeling so happy at line 173
 		return [channel.columns, channel.rows];
 	}, w = (...a) => channel.write(...a),// cursor_pos = () => cc,
 	private_control = (c,b) => (ctrl+"?"+String(c)+(b===true?'h':'l')),
@@ -35,14 +43,34 @@ const
 	set_buffer = (b) => privctrl(buffer_control,b), set_cursor = (b) => privctrl(cursor_control,b),
 	[M_UP,M_DOWN,M_RIGHT,M_LEFT] = [0,1,2,3], key_names = ["up","down","right","left"],
 	normal_refresh_rate = 50, inc = i=>(i+1), jump = (y,x) => (ctrl+[x,y].map(Math.floor).map(inc).join(';')+'H');
+	// should implement a class where coloring or formatting is specified in an alternate way that doesn't
+	// rely on stuffing escape codes in strings, since it still looks kind of ugly,
+	// and instead strings are broken up with format codes in between ***
 var UIStack = []; // active UI pages from back to front
+function createLock()
+{
+	var s,j;
+	return {promise:new Promise((res,rej)=>{s=res,j=rej;}),resolve:s,reject:j};
+}
+function coverage(str,pat,cap=0)
+{
+	var l = 0;
+	var m;
+	var once = !pat.global;
+	while ((m = pat.exec(str)) !== null && (pat.global || once)) {
+		l += m[cap].length;
+		once = false;
+	}
+	return l;
+}
 // TODO: add WINAPI inputrecord stuff
 function activateFlow(flow) {
-	var interrupt = false;
+	var internal = {interrupt: false};
 	input.setRawMode(true);
 	input.resume();
 	input.removeAllListeners('data');
 	// use to control stuff from console window
+	// and add readline routine thing
 	input.on('data', k => {
 		var trigger = null;
 		switch (k.length)
@@ -51,7 +79,7 @@ function activateFlow(flow) {
 				switch (k[0]) // * can this be condensed
 				{
 					case 3:
-						interrupt = true;
+						internal.interrupt = true;
 						break;
 					default:
 						if (k[0] >= 0x20 && k[0] < 0x7F) // typeable character
@@ -107,19 +135,29 @@ function activateFlow(flow) {
 			process.title = "pressed: "+k.toString('hex')+(trigger !== null ? (", trigger: "+[trigger]) : "");
 		}
 	});
-	var loop = (async function(_this) { // should probably make a class for async functions i can stop
+	var looplock = createLock(), busylock = createLock();
+	var control = {next: looplock.promise, busy: busylock.promise};
+	var loop = (async(_this) => { // should probably make a class for async functions i can stop
 		var new_screen = ctrl+'2J';
 		var buf = private_control(buffer_control,true)+private_control(cursor_control,true)+new_screen;
 		global.VBlank = true;
-		while (!interrupt) {
+		var firsttick = true;
+		while (!internal.interrupt) {
 			if (!global.VBlank)
 			{
+				// put event listening here
 				await sleep(5);
 				continue;
 			}
 			global.VBlank = false;
+			if (!firsttick)
+			{
+				busylock = createLock();
+				control.busy = busylock.promise;
+				looplock.resolve(); // finish await next
+			}
 			//set_cursor(false);
-			var cat = _this.refresh();
+			var cat = _this.refresh(); // ***
 			if (typeof cat === 'string')
 				buf += cat;
 			var [wx,wy] = res();
@@ -134,22 +172,33 @@ function activateFlow(flow) {
 			// shouldn't rely on 2J and redrawing everything directly,
 			// but this buffer building is working pretty fluidly without flicker :D
 			//set_cursor(_this.cursor);
+			busylock.resolve();
+			looplock = createLock();
+			control.next = looplock.promise;
+			if (firsttick)
+				firsttick = false;
 		}
+		_this._control = null;
+		looplock.resolve(); // reject throwing discourages me from using it kind of
 		set_buffer(false);
 		set_cursor(true);
 		//popFlow();
-	})(flow);
-	return {
-		timer: (async function(_this) {
-			while (true)
+	})(flow), timer = (async(_this) => {
+		while (true)
+		{
+			await sleep(_this.interval ?? normal_refresh_rate);
+			global.VBlank = true;
+			if (internal.interrupt)
 			{
-				await sleep(_this.interval ?? normal_refresh_rate);
-				global.VBlank = true;
-				if (interrupt)
-					break;
+				// should put a reject here, don't know what for yet
+				break;
 			}
-		})(flow), loop, flow
-	};
+		}
+	})(flow);
+	Object.assign(control, {loop, flow, timer, end: async() => {
+		internal.interrupt=true; return await loop;
+	}});
+	return control;
 }
 function pushFlow(flow) {
 	if (!flow.hasOwnProperty('items') || !flow.persistent)
@@ -206,13 +255,78 @@ class Label extends Control {
 	static UI_RIGHT = 2;
 	draw() {
 		var text = this.data.text;
-		var display_text = text.replace(ctrlcap, ''); // should only contain colors in this stuff
-		var max_width = display_text.split(/[\r\n]/g).sort((a,b)=>a.length-b.length).slice(-1)[0].length;
 		var [w,h] = res();
 		var y = this.y;
-		text = text.
-			replace(new RegExp('^(.{0,'+(w-this.x)+'}).*$','gmi'), '$1').
-			replace(/\r?\n/g, ()=>jump(this.x,++y));
+		var lines_allowed = h-y;
+		var cutoff = text.length;
+		{
+			var nl = /\r?\n/g;
+			var j = 0;
+			var i = 0;
+			var test;
+			for (; i < lines_allowed; i++)
+			{
+				if ((test = nl.exec(text+'\n'/*why*/)) !== null)
+					j = test.index;
+				else
+					break;
+			}
+			if (test !== null) // too short to cut off
+				cutoff = j;
+		}
+		//var x = 0;
+		text = text.substring(0,j).
+			replace(new RegExp('^(.*)$','gmi'), (line)=>{
+				//if (x++ >= lines_allowed)
+				//	return '';
+				// brain damage
+				var rc = 0;
+				var i = 0;
+				var text = '';
+				var gotctrl = false; // should rely on a condition using other variables instead
+				var overflowed = false;
+				var parse = new RegExp(ctrlcap.source, ctrlcap.flags + (ctrlcap.global ? '' : 'g'));
+				while (true)
+				{
+					var cap = parse.exec(line);
+					if (cap !== null)
+					{
+						gotctrl = true;
+						var between = line.substring(i, cap.index);
+						var overflow = ((w-this.x)-(rc+between.length));
+						if (overflow <= 0) {
+							overflowed = true;
+							text += line.substring(i, cap.index + overflow);
+						}
+						if (!overflowed) {
+							text += between;
+							rc += between.length;
+							i += cap.index + cap[0].length; // after end of capture
+						}
+						text += cap[0];
+					}
+					else
+					{
+						if (!gotctrl)
+						{
+							var end = line.substring(i);
+							var overflow = ((w-this.x)-(end.length));
+							if (overflow < 0)
+								end = end.slice(0, overflow);
+							text += end;
+						}
+						else
+						{
+							if (!overflowed)
+								text += line.substring(i);
+						}
+						break;
+					}
+					// handle jumps as new lines
+				}
+				return text;
+			}).
+			replace(/\r?\n/g, ()=>jump(this.x,++y))+ctrl+'0m';
 		return text;
 	}
 	get type() { return UI_LABEL; }
@@ -246,25 +360,37 @@ class Page {
 		this._cursor = cursor;
 		this.object = object;
 		this.persistent = persistent;
-		this.interval = normal_refresh_rate;
+		this.interval = normal_refresh_rate; // tfw not room_speed
 		this.cursor_start = [0, 0];
 		this.cursor_pos = this.cursor_start;
+		this._control = null;
 	}
+	get active() { return this._control !== null; }
 	get cursor() { return this._cursor === true; }
 	set cursor(b) {
 		this._cursor = b === true;
 	}
 	present(replace) {
-		return pushFlow(this);
+		return this._control = pushFlow(this);
+	}
+	async exit() {
+		if (this.active)
+		{
+			await _control.end();
+			console.log(2);
+		}
 	}
 	find(id) {
 		for (var i = 0; i < this.items.length; i++)
 		{
-			if (this.items[i].hasOwnProperty('id') &&
-				this.items[i].id === id)
+			if (this.items[i].hasOwnProperty('id') && this.items[i].id === id)
 				return this.items[i];
 		}
 		return null;
+	}
+	execute(name, ...args) {
+		if (typeof this[name] === 'function')
+			return this[name](...args);
 	}
 }
 module.exports = {
@@ -272,46 +398,6 @@ module.exports = {
 		UI_BASE, UI_LABEL,
 		Control, Label, Page,
 		res
-	}, assert
+	}, ...defaultExports, canDraw
 };
 
-
-
-/*
-if (false)
-{
-	const ui = { // yanked out of xrpt that had basic text draw buffer building and the vblank timer
-		pages: { // going neversoft style here
-			main: {
-				create: function() {
-				},
-				destroy: function() {
-				},
-				refresh: function() {
-					var mybuf = "";
-					return mybuf;
-				},
-				elements: [
-					{
-						type: UI_LABEL,
-						pos: [ 4, 4 ],
-						//dims: [ 10, 1 ],
-						data: {
-							align: Label.UI_LEFT,
-							text: "test"
-						}
-					}
-				]
-			}
-		},
-		current_page: 'main'
-	};
-	// test isTTY: bun -e "console.log(process.stdout);" 1>nul 2>E:\tty_testtt.txt 1>&2
-	// for subinterfaces controlled with arrows
-
-	//process.on("exit", input.close); // wtf is "this.destroy()"
-	process.on("exit", () => set_buffer(false));
-	process.on("exit", () => set_cursor(true));
-	process.exit();
-}
-*/
