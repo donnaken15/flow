@@ -11,19 +11,17 @@ var test = new UI.Page([
 Object.assign(test, {
 	cursor: false,
 	cursor_start: [2, 2],
-	interval: 15,
+	interval: 7,
 	refresh: () => {
 		//if (performance.now() < 3000) return;
 		var label = test.find('test');
 		[['sin','x',35],['cos','y',20]].forEach(i=>{
 			label[i[1]] = Math.floor(4 + (i[2]*(1+Math[i[0]]((performance.now()/1000)*Math.PI))));
 		});
-		//label.x = Math.floor(4 + (35*(1+Math.sin((performance.now()/1000)*Math.PI))));
-		//label.y = Math.floor(4 + (21*(1+Math.cos((performance.now()/1000)*Math.PI))));
 		label.data.text =
 			'\x1b['+rainbow[Math.floor((performance.now()/(500/6)))%6]+'mwoooooooaaaAAAAaaoooooooooo-\x1b[95m\n'+
-			Math.abs(Math.cos((performance.now()/1000)*Math.PI).toFixed(3)).toString().padStart(8)+'\x1b[36m\n'+
-			test.cursor_pos+'\x1b[0m\nBBBBBBBBBB\nYYYYYYYYYYYYY\nXXXXXXXXXXXXXX\nZZZZZZZZZ\n33333333\n44444\nAAAAAAAAA';
+			//Math.abs(Math.cos((performance.now()/1000)*Math.PI).toFixed(3)).toString().padEnd(5,'0').padStart(8)+'\x1b[36m\n'+
+			test.cursor_pos+'';
 		test.cursor_pos = [label.x+20, label.y+3];
 	}
 });

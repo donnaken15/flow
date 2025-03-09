@@ -1,0 +1,1 @@
+module.exports = (name) => Object.entries(require(name)).forEach(([name, exported]) => global[name] = exported); // ffs
